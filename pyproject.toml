@@ -1,0 +1,99 @@
+[project]
+name = "agent-loom"
+version = "0.0.1"
+description = "A memory-augmented multi-agent harness implementing AgentFlow, MAGE, Swarm Skills, and Holistic Evaluation."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [
+    { name = "Katsuyuki Shimbo" }
+]
+keywords = ["llm", "agent", "harness", "memory", "multi-agent", "agentflow", "mage", "swarm-skills"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    # LLM providers
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+    # Data models
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    # Storage
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14.0",
+    "psycopg[binary]>=3.2.0",
+    "pgvector>=0.3.6",
+    # Embeddings fallback (so the lib doesn't hard-require OpenAI)
+    "sentence-transformers>=3.0.0 ; platform_system != 'Darwin' or platform_machine == 'arm64'",
+    # Telemetry / logging
+    "structlog>=24.4.0",
+    "rich>=13.9.0",
+    # CLI
+    "typer>=0.13.0",
+    # Async / HTTP
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dashboard = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=13.0",
+]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+]
+benchmark = [
+    "matplotlib>=3.9.0",
+    "pandas>=2.2.0",
+]
+
+[project.scripts]
+agent-loom = "agent_loom.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/katsuyuki-shimbo/agent-loom"
+Documentation = "https://github.com/katsuyuki-shimbo/agent-loom/tree/main/docs"
+Issues = "https://github.com/katsuyuki-shimbo/agent-loom/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_loom"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Why ignore: types.py uses datetime.utcnow() as a default factory and is
+# locked for Phase 0. The deprecation is upstream Python 3.12+; lift the
+# ignore when types.py opens up for changes in Phase 2.
+filterwarnings = [
+    "ignore:datetime.datetime.utcnow:DeprecationWarning",
+]
