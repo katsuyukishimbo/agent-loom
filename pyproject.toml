@@ -80,7 +80,11 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
-ignore = ["E501"]
+# Why ignore RUF001/RUF002/RUF003: the "ambiguous character" `×` (U+00D7
+# MULTIPLICATION SIGN) appears intentionally throughout the codebase as
+# the standard `R × I × R` notation from Stanford Generative Agents. Banning
+# it would force ASCII `x` and obscure the math.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.11"

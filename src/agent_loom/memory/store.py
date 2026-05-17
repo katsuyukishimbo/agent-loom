@@ -1,6 +1,7 @@
 """Episodic memory store with R × I × R retrieval.
 
-Phase 1 implementation target. Stub in Phase 0.
+Phase 1a: In-memory implementation. Phase 1b will swap in pgvector behind the
+same `EpisodicStore` protocol.
 
 Score formula:
     score(episode) = recency(episode) * importance(episode) * relevance(episode, query)
@@ -13,9 +14,12 @@ Score formula:
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
+
+from agent_loom.memory.embeddings import cosine_similarity
 
 
 class Episode(BaseModel):
@@ -27,6 +31,10 @@ class Episode(BaseModel):
     last_referenced_at: datetime = Field(default_factory=datetime.utcnow)
     embedding: list[float] | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
+    source: str = Field(
+        default="executor",
+        description="Which module wrote this episode (e.g. 'executor', 'reflection').",
+    )
 
 
 def recency_score(episode: Episode, now: datetime | None = None) -> float:
@@ -51,13 +59,116 @@ def importance_normalized(episode: Episode) -> float:
     return min(max(episode.importance, 0.0), 10.0) / 10.0
 
 
-class EpisodicStore:
-    """Phase 0 stub. Replace with real pgvector-backed store in Phase 1."""
+def relevance_score(episode: Episode, query_embedding: list[float]) -> float:
+    """Cosine similarity between episode and query embedding, clamped to [0, 1].
 
-    async def write(self, content: str, importance: float, embedding: list[float] | None = None) -> Episode:
-        # TODO(phase-1): INSERT INTO episodes ... with embedding.
-        raise NotImplementedError("EpisodicStore.write is implemented in Phase 1.")
+    Why clamp: cosine returns [-1, 1] but our R × I × R formula multiplies three
+    factors all in [0, 1] so negative values would invert the ranking direction
+    in confusing ways. A negative relevance just means "not similar" — treat as 0.
+    """
+    if episode.embedding is None:
+        return 0.0
+    sim = cosine_similarity(episode.embedding, query_embedding)
+    return max(0.0, min(1.0, sim))
 
-    async def recall(self, query: str, *, top_k: int = 5) -> list[Episode]:
-        # TODO(phase-1): SELECT scored by R × I × R, increment references_count.
-        raise NotImplementedError("EpisodicStore.recall is implemented in Phase 1.")
+
+def rir_score(
+    episode: Episode,
+    query_embedding: list[float],
+    *,
+    now: datetime | None = None,
+) -> float:
+    """Compose the three factors. Each one is independently testable above."""
+    return (
+        recency_score(episode, now=now)
+        * importance_normalized(episode)
+        * relevance_score(episode, query_embedding)
+    )
+
+
+# --- Store protocol -------------------------------------------------------
+
+
+@runtime_checkable
+class EpisodicStore(Protocol):
+    """Async store of episodes with vector search.
+
+    Why a Protocol: pgvector (Phase 1b) will plug in here without changing
+    `MemoryHub`. The in-memory implementation below is the Phase 1a default.
+    """
+
+    async def write(self, episode: Episode) -> Episode:
+        """Persist `episode`. Returns the stored copy (same instance is fine)."""
+        ...
+
+    async def recall(
+        self,
+        query_embedding: list[float],
+        *,
+        top_k: int = 5,
+        now: datetime | None = None,
+    ) -> list[Episode]:
+        """Return up to `top_k` episodes ranked by R × I × R.
+
+        Implementations MUST increment `references_count` and bump
+        `last_referenced_at` for each returned episode.
+        """
+        ...
+
+    async def list_all(self) -> list[Episode]:
+        """Diagnostic helper. Not used in hot path."""
+        ...
+
+
+# --- In-memory implementation --------------------------------------------
+
+
+class InMemoryEpisodicStore:
+    """Phase 1a default. Dict-backed, brute-force scan on `recall`.
+
+    Sized for ≤1k episodes — Phase 1b replaces this with pgvector for real
+    deployments. The brute-force scan stays correct, just slow.
+    """
+
+    def __init__(self) -> None:
+        self._episodes: dict[UUID, Episode] = {}
+
+    async def write(self, episode: Episode) -> Episode:
+        self._episodes[episode.episode_id] = episode
+        return episode
+
+    async def recall(
+        self,
+        query_embedding: list[float],
+        *,
+        top_k: int = 5,
+        now: datetime | None = None,
+    ) -> list[Episode]:
+        now = now or datetime.utcnow()
+        scored: list[tuple[float, Episode]] = []
+        for ep in self._episodes.values():
+            if ep.embedding is None:
+                # Skip episodes without embeddings — they can't be ranked by
+                # relevance, so they would all share a 0 score and pollute the
+                # output. They are still retrievable via `list_all`.
+                continue
+            s = rir_score(ep, query_embedding, now=now)
+            scored.append((s, ep))
+
+        # Stable sort by score descending. Ties keep insertion order, which
+        # gives deterministic test output.
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        winners = [ep for _, ep in scored[:top_k]]
+
+        # References-count update: do it AFTER selection so a single recall
+        # round bumps each returned episode exactly once.
+        for ep in winners:
+            ep.references_count += 1
+            ep.last_referenced_at = now
+        return winners
+
+    async def list_all(self) -> list[Episode]:
+        return list(self._episodes.values())
+
+    def __len__(self) -> int:
+        return len(self._episodes)

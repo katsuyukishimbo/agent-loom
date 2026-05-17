@@ -5,6 +5,10 @@ Owns:
 - The run-level budget (max_cost_usd, total_cost_usd).
 - The retry loop: plan once, then generate/verify until passed OR
   max_iterations reached OR budget blown.
+- (Phase 1a) The memory write call after the Verifier judges each attempt.
+  The Executor is the only module allowed to write to MemoryHub. Planner is
+  read-only; Generator and Verifier never touch memory. This mirrors
+  "writes single-threaded" at the memory layer.
 
 Why a single owner for writes: it keeps the "writes single-threaded"
 invariant trivial — the other modules return TraceEvents as values, this one
@@ -28,6 +32,7 @@ from agent_loom.core.types import (
     VerifierJudgement,
 )
 from agent_loom.core.verifier import Verifier
+from agent_loom.memory.hub import MemoryHub
 
 
 class BudgetExceeded(RuntimeError):
@@ -41,11 +46,13 @@ class Executor:
         generator: Generator,
         verifier: Verifier,
         max_iterations: int = 3,
+        memory_hub: MemoryHub | None = None,
     ) -> None:
         self.planner = planner
         self.generator = generator
         self.verifier = verifier
         self.max_iterations = max_iterations
+        self.memory_hub = memory_hub
 
     async def run(self, user_goal: str) -> Run:
         settings = get_settings()
@@ -56,6 +63,11 @@ class Executor:
             contract, plan_event = await self.planner.plan(
                 run_id=run.run_id, user_goal=user_goal
             )
+            # Drain memory_read events (Phase 1a) that the Planner buffered
+            # during recall. Writing them here keeps trace persistence single-
+            # threaded inside the Executor.
+            for side_event in getattr(self.planner, "drain_side_events", lambda: [])():
+                trace_writer.write(side_event)
             trace_writer.write(plan_event)
             run.total_cost_usd += plan_event.cost_usd
             self._check_budget(run, contract)
@@ -99,7 +111,7 @@ class Executor:
     ) -> tuple[Artifact, VerifierJudgement]:
         """Re-try generate→verify until passed, exhausted, or over budget.
 
-        Why re-using the same SprintContract across iterations: Phase 0 keeps
+        Why re-using the same SprintContract across iterations: Phase 0/1a keep
         the loop minimal. Reflective re-planning (a new contract with
         `forbidden` entries derived from failure) is a Phase 2 feature.
         """
@@ -122,6 +134,20 @@ class Executor:
             )
             trace_writer.write(ver_event)
             run.total_cost_usd += ver_event.cost_usd
+
+            # Memory write happens AFTER the Verifier's judgement is on disk so
+            # a crash mid-write doesn't lose the judgement, only the memory
+            # record. Done before the budget check so we still capture the
+            # episode even if the next iteration would push us over budget.
+            if self.memory_hub is not None:
+                await self._write_memory_episode(
+                    contract=contract,
+                    artifact=artifact,
+                    judgement=judgement,
+                    trace_writer=trace_writer,
+                    run=run,
+                )
+
             self._check_budget(run, contract)
 
             if judgement.passed:
@@ -131,6 +157,46 @@ class Executor:
         # pair so callers can inspect the failed attempt.
         assert artifact is not None and judgement is not None  # for type checker
         return artifact, judgement
+
+    async def _write_memory_episode(
+        self,
+        *,
+        contract: SprintContract,
+        artifact: Artifact,
+        judgement: VerifierJudgement,
+        trace_writer: TraceWriter,
+        run: Run,
+    ) -> None:
+        """Write a single Episode for this attempt and record a trace event.
+
+        Why a private helper: the call has three side effects (LLM call for
+        importance, store insert, trace write) and bundling them keeps the
+        loop body readable.
+        """
+        assert self.memory_hub is not None  # for type checker
+        started_at = datetime.utcnow()
+        episode = await self.memory_hub.write_from_judgement(
+            contract=contract, artifact=artifact, judgement=judgement
+        )
+        ended_at = datetime.utcnow()
+        trace_writer.write(
+            make_event(
+                run_id=run.run_id,
+                module="executor",
+                kind="memory_write",
+                started_at=started_at,
+                ended_at=ended_at,
+                inputs={
+                    "contract_id": str(contract.contract_id),
+                    "artifact_id": str(artifact.artifact_id),
+                },
+                outputs={
+                    "episode_id": str(episode.episode_id),
+                    "importance": episode.importance,
+                    "passed": judgement.passed,
+                },
+            )
+        )
 
     def _check_budget(self, run: Run, contract: SprintContract) -> None:
         if run.total_cost_usd >= contract.max_cost_usd:
