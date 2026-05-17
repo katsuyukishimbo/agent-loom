@@ -127,7 +127,7 @@ See [docs/PAPERS.md](docs/PAPERS.md) for the full mapping between each paper's c
 
 ## Quick Start
 
-> **Note**: This is WIP. Phase 0 lands the minimal harness. Roadmap in [docs/PHASES.md](docs/PHASES.md).
+> **Note**: This is WIP. Phases 0 and 1 are done. Roadmap in [docs/PHASES.md](docs/PHASES.md).
 
 ```bash
 # Clone and install
@@ -139,11 +139,31 @@ uv sync   # or: pip install -e .
 cp .env.example .env
 # Fill in ANTHROPIC_API_KEY, OPENAI_API_KEY
 
-# Run the smallest end-to-end demo
+# Run the smallest end-to-end demo (in-memory store, no docker needed)
 python -m agent_loom.examples.hello_harness
+
+# Phase 1b — persistent memory across processes
+./scripts/dev_db_up.sh           # docker compose: Postgres 16 + pgvector
+alembic upgrade head             # initial schema
+AGENT_LOOM_USE_PG=1 python -m agent_loom.examples.hello_harness  # 1st run writes
+AGENT_LOOM_USE_PG=1 python -m agent_loom.examples.hello_harness  # 2nd run recalls
+
+# Memory recall benchmark (Phase 1b DoD: <200ms / 1k episodes)
+AGENT_LOOM_FAKE_LLM=1 python -m benchmarks.memory_recall_bench --reset
 
 # Run the Bug-Fix Marathon (Phase 3+)
 python -m agent_loom.benchmarks.bugfix_marathon --tasks 10 --conditions solo,harness,memory
+```
+
+### Phase 1b benchmark (measured on dev laptop, 2026-05-17)
+
+```
+$ AGENT_LOOM_FAKE_LLM=1 python -m benchmarks.memory_recall_bench --reset
+[bench] seeding 1000 episodes (existing=0)...
+[bench] seed wall: 18.68s
+[bench] timing recall over 100 iterations...
+[bench] recall  n= 100  mean=110.21ms  p50=109.18ms  p95=128.35ms  max=163.00ms
+[bench] Phase 1b DoD (<200.0ms mean): PASS
 ```
 
 ---
@@ -152,8 +172,9 @@ python -m agent_loom.benchmarks.bugfix_marathon --tasks 10 --conditions solo,har
 
 | Phase | Status | Description |
 |---|---|---|
-| **Phase 0** — Foundation | 🚧 In progress | Minimal Planner / Generator / Verifier with Clean Context |
-| **Phase 1** — Memory MVP | 📋 Planned | R×I×R retrieval over pgvector |
+| **Phase 0** — Foundation | ✅ Done | Minimal Planner / Generator / Verifier with Clean Context |
+| **Phase 1a** — Memory in-process | ✅ Done | R×I×R retrieval over in-memory store |
+| **Phase 1b** — Memory persistent | ✅ Done | pgvector-backed store; cross-process recall; <200ms / 1k episodes |
 | **Phase 2** — Reflexion Loop | 📋 Planned | Reflective compaction + KG (MAGE-style) |
 | **Phase 3** — Benchmark & Showcase | 📋 Planned | 3-condition benchmark + dashboards + first public release |
 

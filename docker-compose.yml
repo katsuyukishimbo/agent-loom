@@ -1,0 +1,32 @@
+# Phase 1b — Postgres + pgvector for episodic memory.
+#
+# Why port 5434: 5432 is the system default, 5433 was claimed by another
+# project (replan-db-1) on the dev machine. 5434 keeps `docker compose up`
+# working without manual surgery. Override by exporting AGENT_LOOM_PG_PORT
+# before invoking compose.
+#
+# Why TMPDIR=/tmp on macOS: Docker Desktop's default /var/folders/... tmp
+# directory occasionally causes "no space left on device" when building images.
+# The wrapper scripts/dev_db_up.sh exports TMPDIR=/tmp before invoking compose.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: agent_loom_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agent_loom
+      POSTGRES_PASSWORD: agent_loom
+      POSTGRES_DB: agent_loom
+    ports:
+      - "${AGENT_LOOM_PG_PORT:-5434}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent_loom -d agent_loom"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:

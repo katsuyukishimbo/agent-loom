@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # responses. Used by tests and by hello_harness when no API key is set.
     agent_loom_fake_llm: bool = False
 
+    # Phase 1b — episodic store backend.
+    # `database_url` is read but ALSO ignored when AGENT_LOOM_USE_PG is unset
+    # (so existing in-memory tests don't accidentally hit a running Postgres).
+    database_url: str | None = None
+    agent_loom_use_pg: bool = False
+
 
 def get_settings() -> Settings:
     """Factory so tests can monkeypatch env between cases."""

@@ -234,10 +234,37 @@ Each SprintContract carries a `max_cost_usd` field. Executor halts and escalates
 ## 7. Storage
 
 - **PostgreSQL 16 + pgvector** — episodic memory, traces, skill registry
-- **SQLite** — local dev fallback (no pgvector; uses brute-force cosine)
+- **In-memory `InMemoryEpisodicStore`** — Phase 0/1a default, used in tests and `MemoryHub.fake()`
 - **Filesystem** — `skills/*.md` (so they're git-diffable), `runs/<run_id>/` (artifacts)
 
 Schema migrations via Alembic.
+
+### 7.1 Phase 1b — pgvector implementation (shipped)
+
+The `PgvectorEpisodicStore` plugs into the same `EpisodicStore` Protocol as the
+in-memory store, so `MemoryHub(store=...)` is the only swap. Cross-process
+recall is proven by `tests/test_cross_process_recall.py`: two `python -m
+agent_loom.examples.hello_harness --store pg` invocations share state through
+Postgres, and the second run's Planner bumps `references_count` on the first
+run's episode.
+
+Implementation choices:
+
+- **IVFFlat index** (`vector_cosine_ops`, `lists=100`) for ANN retrieval.
+  Query path sets `ivfflat.probes=100` per transaction — small datasets need
+  every list scanned; benchmark and unit tests confirm correctness, and 1k
+  episodes still recalls in <200ms mean.
+- **Two-stage rank**: ANN narrows to `top_k * 3` candidates, then `rir_score`
+  in Python reorders by recency × importance × relevance. This keeps the
+  scoring formula source-of-truth in one place (`memory/store.py::rir_score`).
+- **One round-trip for the references-count update** via `UPDATE ... WHERE
+  episode_id = ANY($1::uuid[])` — `top_k` rows in a single call.
+- **ON CONFLICT UPDATE** writes so tests and reflection passes can re-write
+  the same episode id without try/except gymnastics.
+
+Phase 1b is the cut-off for memory plumbing changes. The KG layer (§2 four
+subgraphs) lands in Phase 2 with a `graph_nodes` + `graph_edges` migration on
+top of the same database.
 
 ---
 
