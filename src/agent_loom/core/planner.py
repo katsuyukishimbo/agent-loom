@@ -1,10 +1,12 @@
 """Planner — decomposes a user goal into a SprintContract.
 
-Phase 1a: optional MemoryHub for recall. When supplied, the Planner pulls
-top-K episodes via R × I × R and weaves a short summary into the
-SprintContract's `persona` so the Generator inherits prior context without us
-having to change `types.py`. Phase 2 will promote failure episodes into the
-contract's `forbidden` field once that pipeline is built.
+Phase 1a wired optional MemoryHub for recall and threaded a one-paragraph
+recall preface through the persona field. Phase 2 adds:
+
+- **Failure constraint injection**: a second recall call narrowed to
+  failure-tagged Episodes (`recall_failures`) produces strings that go
+  straight into `SprintContract.forbidden`. The Generator sees them; the
+  Verifier reads `forbidden` and grades accordingly.
 
 Public API:
     plan(run_id, user_goal) -> (SprintContract, TraceEvent)
@@ -32,12 +34,17 @@ class Planner:
         model: str | None = None,
         memory_hub: MemoryHub | None = None,
         recall_top_k: int = 3,
+        forbidden_top_k: int = 3,
     ) -> None:
         # Why nullable + late-bind: tests can pass model="fake" explicitly; real
         # callers let env-vars decide via Settings.
         self.model = model or get_settings().planner_model
         self.memory_hub = memory_hub
         self.recall_top_k = recall_top_k
+        # Failure constraint injection — pulled with a separate, narrower
+        # recall so the persona preface and the forbidden list don't fight
+        # for the same ranked slots.
+        self.forbidden_top_k = forbidden_top_k
         # Side-channel for non-LLM TraceEvents the Executor must persist. We
         # keep the public plan() return shape as `(contract, event)` so all
         # existing tests and the executor subclass-override pattern keep
@@ -62,6 +69,7 @@ class Planner:
         self._side_events = []
 
         recall_preface = ""
+        forbidden_injections: list[str] = []
         if self.memory_hub is not None:
             recall_started = datetime.utcnow()
             episodes = await self.memory_hub.recall(user_goal, top_k=self.recall_top_k)
@@ -78,6 +86,36 @@ class Planner:
                     outputs={
                         "episode_ids": [str(e.episode_id) for e in episodes],
                         "count": len(episodes),
+                    },
+                )
+            )
+
+            # Failure constraint injection (Phase 2 core). We deliberately
+            # query the store twice — once for general recall, once for
+            # failure-only — rather than filtering the first result list:
+            # general recall over-fetches strong successes which crowd out
+            # the smaller failure population.
+            forbid_started = datetime.utcnow()
+            failures = await self.memory_hub.recall_failures(
+                user_goal, top_k=self.forbidden_top_k
+            )
+            forbid_ended = datetime.utcnow()
+            forbidden_injections = MemoryHub.format_failures_for_forbidden(failures)
+            self._side_events.append(
+                make_event(
+                    run_id=run_id,
+                    module="planner",
+                    kind="memory_read",
+                    started_at=forbid_started,
+                    ended_at=forbid_ended,
+                    inputs={
+                        "query": user_goal,
+                        "top_k": self.forbidden_top_k,
+                        "filter": "failures",
+                    },
+                    outputs={
+                        "episode_ids": [str(e.episode_id) for e in failures],
+                        "count": len(failures),
                     },
                 )
             )
@@ -101,6 +139,16 @@ class Planner:
             contract = contract.model_copy(
                 update={"persona": f"{recall_preface}\n\n{contract.persona}"}
             )
+
+        if forbidden_injections:
+            # Extend, don't overwrite: the LLM may already have emitted its
+            # own forbidden entries based on the goal text. De-duplicate the
+            # union so repeated runs don't accumulate identical strings.
+            merged: list[str] = list(contract.forbidden)
+            for item in forbidden_injections:
+                if item not in merged:
+                    merged.append(item)
+            contract = contract.model_copy(update={"forbidden": merged})
 
         event = make_event(
             run_id=run_id,

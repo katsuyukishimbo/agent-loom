@@ -95,6 +95,11 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Why pythonpath = ["."]: the `benchmarks/` package sits at repo root (not
+# under src/) and the Phase 2 repeat-failure-rate test imports it directly.
+# Adding "." here makes pytest discover both `agent_loom` (via the editable
+# install) and `benchmarks` (top-level dir) without restructuring the tree.
+pythonpath = ["."]
 # Why ignore: types.py uses datetime.utcnow() as a default factory and is
 # locked for Phase 0. The deprecation is upstream Python 3.12+; lift the
 # ignore when types.py opens up for changes in Phase 2.

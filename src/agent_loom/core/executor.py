@@ -139,11 +139,31 @@ class Executor:
             # a crash mid-write doesn't lose the judgement, only the memory
             # record. Done before the budget check so we still capture the
             # episode even if the next iteration would push us over budget.
+            written_episode = None
             if self.memory_hub is not None:
-                await self._write_memory_episode(
+                written_episode = await self._write_memory_episode(
                     contract=contract,
                     artifact=artifact,
                     judgement=judgement,
+                    trace_writer=trace_writer,
+                    run=run,
+                )
+
+            # Reflective Compaction (Phase 2). Failures trigger a separate LLM
+            # call that distills "what went wrong" into a high-importance
+            # Episode the next Planner can read. We do this BEFORE the budget
+            # check so a tight budget still gets the reflection on disk.
+            if (
+                not judgement.passed
+                and self.memory_hub is not None
+                and written_episode is not None
+            ):
+                run.status = RunStatus.REFLECTING
+                await self._write_reflection_episode(
+                    contract=contract,
+                    artifact=artifact,
+                    judgement=judgement,
+                    source_episode=written_episode,
                     trace_writer=trace_writer,
                     run=run,
                 )
@@ -166,12 +186,15 @@ class Executor:
         judgement: VerifierJudgement,
         trace_writer: TraceWriter,
         run: Run,
-    ) -> None:
+    ):
         """Write a single Episode for this attempt and record a trace event.
 
         Why a private helper: the call has three side effects (LLM call for
         importance, store insert, trace write) and bundling them keeps the
         loop body readable.
+
+        Returns the written `Episode` so the caller can attach a derived
+        reflection edge in the same iteration.
         """
         assert self.memory_hub is not None  # for type checker
         started_at = datetime.utcnow()
@@ -194,6 +217,57 @@ class Executor:
                     "episode_id": str(episode.episode_id),
                     "importance": episode.importance,
                     "passed": judgement.passed,
+                },
+            )
+        )
+        return episode
+
+    async def _write_reflection_episode(
+        self,
+        *,
+        contract: SprintContract,
+        artifact: Artifact,
+        judgement: VerifierJudgement,
+        source_episode,
+        trace_writer: TraceWriter,
+        run: Run,
+    ) -> None:
+        """Run Reflective Compaction and persist the resulting Episode.
+
+        Why a second helper rather than folding into `_write_memory_episode`:
+        the reflection call is a distinct LLM call (different role, different
+        cost) and we want a separate `memory_write` trace event for it so the
+        replay UI can show the failure → reflection pairing.
+        """
+        assert self.memory_hub is not None  # for type checker
+        started_at = datetime.utcnow()
+        reflection_ep = await self.memory_hub.write_reflection(
+            contract=contract,
+            artifact=artifact,
+            judgement=judgement,
+            source_episode=source_episode,
+        )
+        ended_at = datetime.utcnow()
+        trace_writer.write(
+            make_event(
+                run_id=run.run_id,
+                module="executor",
+                kind="memory_write",
+                started_at=started_at,
+                ended_at=ended_at,
+                inputs={
+                    "contract_id": str(contract.contract_id),
+                    "source_episode_id": str(source_episode.episode_id),
+                    "kind": "reflection",
+                },
+                outputs={
+                    "episode_id": str(reflection_ep.episode_id),
+                    "importance": reflection_ep.importance,
+                    "failure_category": (
+                        judgement.failure_category.value
+                        if judgement.failure_category
+                        else None
+                    ),
                 },
             )
         )

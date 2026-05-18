@@ -100,8 +100,14 @@ async def test_cross_process_recall(tmp_path: Path) -> None:
     )
 
     after_second = await store.list_all()
-    assert len(after_second) == 2, (
-        f"expected 2 episodes after second run, got {len(after_second)}"
+    # Phase 2: the second run's Planner does TWO recalls (general + failures)
+    # and hello_harness adds a third in its demo step. That can push the seed
+    # past the promotion threshold and add a `reasoning`-source Episode to
+    # the count. The cross-process invariant we still care about is "the seed
+    # is in the store and was recalled at least once", not the exact count.
+    executor_eps = [e for e in after_second if e.source == "executor"]
+    assert len(executor_eps) == 2, (
+        f"expected 2 executor-source episodes after second run, got {len(executor_eps)}"
     )
 
     seed = next(e for e in after_second if e.episode_id == seed_id)

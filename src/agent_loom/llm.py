@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from agent_loom.config import cost_for, get_settings
 
-Role = Literal["planner", "generator", "verifier"]
+Role = Literal["planner", "generator", "verifier", "reflection"]
 
 
 @dataclass
@@ -102,6 +102,18 @@ def _fake_response(role: Role, user_prompt: str) -> dict[str, Any]:
             "rubric_breakdown": {"correctness": 0.95, "readability": 0.85},
             "failure_category": None,
             "reflection": "Iterative form satisfies fib(10) == 55. Fake-mode pass.",
+        }
+    if role == "reflection":
+        # Reflective Compaction fake payload. Phase 2 expects a one-paragraph
+        # summary plus an importance score in [8, 10]; we return a constant
+        # high-importance value so tests can assert the failure episode gets
+        # written with the elevated weight.
+        return {
+            "summary": (
+                "Past failure summary (fake mode): the artifact did not satisfy the "
+                "acceptance criteria. Future plans must avoid this failure mode."
+            ),
+            "importance": 9.0,
         }
     raise ValueError(f"Unknown role: {role}")
 
